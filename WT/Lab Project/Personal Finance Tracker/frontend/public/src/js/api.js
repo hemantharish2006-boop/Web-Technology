@@ -1,166 +1,284 @@
-// API Configuration
-const API_BASE_URL = 'http://localhost:8000/api';
+// =====================================================
+// localStorage-based API (GitHub Pages compatible)
+// =====================================================
+
+const _db = {
+  get: (key, def = []) => JSON.parse(localStorage.getItem(key) || JSON.stringify(def)),
+  set: (key, val) => localStorage.setItem(key, JSON.stringify(val)),
+  nextId: (key) => {
+    const arr = JSON.parse(localStorage.getItem(key) || '[]');
+    return arr.length ? Math.max(...arr.map(i => i.id)) + 1 : 1;
+  }
+};
+
+// Seed default categories on first load
+(function seedDefaults() {
+  if (!localStorage.getItem('pft_seeded')) {
+    _db.set('pft_categories', [
+      { id: 1, name: 'Salary',       type: 'income',  icon: '💰' },
+      { id: 2, name: 'Freelance',    type: 'income',  icon: '💻' },
+      { id: 3, name: 'Food',         type: 'expense', icon: '🍔' },
+      { id: 4, name: 'Transport',    type: 'expense', icon: '🚌' },
+      { id: 5, name: 'Shopping',     type: 'expense', icon: '🛍️' },
+      { id: 6, name: 'Bills',        type: 'expense', icon: '📄' },
+      { id: 7, name: 'Health',       type: 'expense', icon: '🏥' },
+      { id: 8, name: 'Entertainment',type: 'expense', icon: '🎬' },
+    ]);
+    _db.set('pft_transactions', []);
+    _db.set('pft_budgets', []);
+    _db.set('pft_goals', []);
+    localStorage.setItem('pft_seeded', '1');
+  }
+})();
 
 class API {
-    static token = localStorage.getItem('authToken');
+  static token = localStorage.getItem('authToken');
 
-    static async request(endpoint, options = {}) {
-        const url = `${API_BASE_URL}${endpoint}`;
-        const headers = {
-            'Content-Type': 'application/json',
-            ...options.headers
-        };
-
-        if (this.token) {
-            headers['Authorization'] = `Bearer ${this.token}`;
-        }
-
-        try {
-            const response = await fetch(url, {
-                ...options,
-                headers
-            });
-
-            if (!response.ok) {
-                if (response.status === 401) {
-                    // Token expired, redirect to login
-                    logout();
-                    return null;
-                }
-                throw new Error(`HTTP ${response.status}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            console.error('API Request Error:', error);
-            return null;
-        }
+  // ---- AUTH ----
+  static async register(userData) {
+    const users = _db.get('pft_users', []);
+    if (users.find(u => u.email === userData.email)) {
+      return { error: 'Email already registered' };
     }
+    const user = { id: (users.length + 1), name: userData.name, email: userData.email, password: userData.password };
+    users.push(user);
+    _db.set('pft_users', users);
+    const token = btoa(user.email + ':' + Date.now());
+    localStorage.setItem('authToken', token);
+    localStorage.setItem('currentUser', JSON.stringify({ id: user.id, name: user.name, email: user.email }));
+    API.token = token;
+    return { success: true, token, user: { id: user.id, name: user.name, email: user.email } };
+  }
 
-    static async get(endpoint) {
-        return this.request(endpoint, { method: 'GET' });
-    }
+  static async login(email, password) {
+    const users = _db.get('pft_users', []);
+    const user = users.find(u => u.email === email && u.password === password);
+    if (!user) return { error: 'Invalid email or password' };
+    const token = btoa(user.email + ':' + Date.now());
+    localStorage.setItem('authToken', token);
+    localStorage.setItem('currentUser', JSON.stringify({ id: user.id, name: user.name, email: user.email }));
+    API.token = token;
+    return { success: true, token, user: { id: user.id, name: user.name, email: user.email } };
+  }
 
-    static async post(endpoint, data) {
-        return this.request(endpoint, {
-            method: 'POST',
-            body: JSON.stringify(data)
-        });
-    }
+  static async logout() {
+    localStorage.removeItem('authToken');
+    localStorage.removeItem('currentUser');
+    API.token = null;
+    return { success: true };
+  }
 
-    static async put(endpoint, data) {
-        return this.request(endpoint, {
-            method: 'PUT',
-            body: JSON.stringify(data)
-        });
-    }
+  static async changePassword({ oldPassword, newPassword }) {
+    const currentUser = JSON.parse(localStorage.getItem('currentUser') || 'null');
+    if (!currentUser) return { error: 'Not authenticated' };
+    const users = _db.get('pft_users', []);
+    const idx = users.findIndex(u => u.id === currentUser.id);
+    if (idx === -1 || users[idx].password !== oldPassword) return { error: 'Incorrect current password' };
+    users[idx].password = newPassword;
+    _db.set('pft_users', users);
+    return { success: true };
+  }
 
-    static async delete(endpoint) {
-        return this.request(endpoint, { method: 'DELETE' });
-    }
+  // ---- HELPERS ----
+  static _currentUserId() {
+    const u = JSON.parse(localStorage.getItem('currentUser') || 'null');
+    return u ? u.id : null;
+  }
 
-    // Auth endpoints
-    static async register(userData) {
-        return this.post('/auth/register', userData);
-    }
+  // ---- TRANSACTIONS ----
+  static async createTransaction(data) {
+    const uid = API._currentUserId();
+    const list = _db.get('pft_transactions', []);
+    const item = { ...data, id: _db.nextId('pft_transactions'), userId: uid, createdAt: new Date().toISOString() };
+    list.push(item);
+    _db.set('pft_transactions', list);
+    return { success: true, data: item };
+  }
 
-    static async login(email, password) {
-        return this.post('/auth/login', { email, password });
-    }
+  static async getTransactions(filters = {}) {
+    const uid = API._currentUserId();
+    let list = _db.get('pft_transactions', []).filter(t => t.userId === uid);
+    if (filters.type)       list = list.filter(t => t.type === filters.type);
+    if (filters.category)   list = list.filter(t => String(t.categoryId) === String(filters.category));
+    if (filters.start_date) list = list.filter(t => t.date >= filters.start_date);
+    if (filters.end_date)   list = list.filter(t => t.date <= filters.end_date);
+    list.sort((a, b) => new Date(b.date) - new Date(a.date));
+    return { success: true, data: list };
+  }
 
-    static async logout() {
-        return this.post('/auth/logout', {});
-    }
+  static async getTransaction(id) {
+    const uid = API._currentUserId();
+    const item = _db.get('pft_transactions', []).find(t => t.id === Number(id) && t.userId === uid);
+    return item ? { success: true, data: item } : { error: 'Not found' };
+  }
 
-    static async changePassword(oldPassword, newPassword) {
-        return this.post('/auth/change-password', { oldPassword, newPassword });
-    }
+  static async updateTransaction(id, data) {
+    const uid = API._currentUserId();
+    const list = _db.get('pft_transactions', []);
+    const idx = list.findIndex(t => t.id === Number(id) && t.userId === uid);
+    if (idx === -1) return { error: 'Not found' };
+    list[idx] = { ...list[idx], ...data };
+    _db.set('pft_transactions', list);
+    return { success: true, data: list[idx] };
+  }
 
-    // Transactions endpoints
-    static async createTransaction(data) {
-        return this.post('/transactions/create', data);
-    }
+  static async deleteTransaction(id) {
+    const uid = API._currentUserId();
+    let list = _db.get('pft_transactions', []);
+    list = list.filter(t => !(t.id === Number(id) && t.userId === uid));
+    _db.set('pft_transactions', list);
+    return { success: true };
+  }
 
-    static async getTransactions(filters = {}) {
-        const query = new URLSearchParams(filters).toString();
-        return this.get(`/transactions?${query}`);
-    }
+  static async getMonthlySummary(year, month) {
+    const uid = API._currentUserId();
+    const prefix = `${year}-${String(month).padStart(2, '0')}`;
+    const list = _db.get('pft_transactions', []).filter(t => t.userId === uid && t.date.startsWith(prefix));
+    const income  = list.filter(t => t.type === 'income').reduce((s, t) => s + Number(t.amount), 0);
+    const expense = list.filter(t => t.type === 'expense').reduce((s, t) => s + Number(t.amount), 0);
+    return { success: true, data: { income, expense, balance: income - expense, transactions: list } };
+  }
 
-    static async getTransaction(id) {
-        return this.get(`/transactions/${id}`);
-    }
+  static async getSpendingByCategory(startDate, endDate) {
+    const uid = API._currentUserId();
+    const list = _db.get('pft_transactions', [])
+      .filter(t => t.userId === uid && t.type === 'expense' && t.date >= startDate && t.date <= endDate);
+    const grouped = {};
+    list.forEach(t => {
+      grouped[t.categoryId] = (grouped[t.categoryId] || 0) + Number(t.amount);
+    });
+    return { success: true, data: grouped };
+  }
 
-    static async updateTransaction(id, data) {
-        return this.put(`/transactions/${id}`, data);
-    }
+  // ---- CATEGORIES ----
+  static async getCategories(type = null) {
+    let list = _db.get('pft_categories', []);
+    if (type) list = list.filter(c => c.type === type);
+    return { success: true, data: list };
+  }
 
-    static async deleteTransaction(id) {
-        return this.delete(`/transactions/${id}`);
-    }
+  static async createCategory(data) {
+    const list = _db.get('pft_categories', []);
+    const item = { ...data, id: _db.nextId('pft_categories') };
+    list.push(item);
+    _db.set('pft_categories', list);
+    return { success: true, data: item };
+  }
 
-    static async getMonthlySummary(year, month) {
-        return this.get(`/transactions/summary/${year}/${month}`);
-    }
+  static async updateCategory(id, data) {
+    const list = _db.get('pft_categories', []);
+    const idx = list.findIndex(c => c.id === Number(id));
+    if (idx === -1) return { error: 'Not found' };
+    list[idx] = { ...list[idx], ...data };
+    _db.set('pft_categories', list);
+    return { success: true, data: list[idx] };
+  }
 
-    static async getSpendingByCategory(startDate, endDate) {
-        return this.get(`/transactions/spending?start=${startDate}&end=${endDate}`);
-    }
+  static async deleteCategory(id) {
+    let list = _db.get('pft_categories', []);
+    list = list.filter(c => c.id !== Number(id));
+    _db.set('pft_categories', list);
+    return { success: true };
+  }
 
-    // Categories endpoints
-    static async getCategories(type = null) {
-        let url = '/categories';
-        if (type) url += `?type=${type}`;
-        return this.get(url);
-    }
+  // ---- BUDGETS ----
+  static async getBudgets() {
+    const uid = API._currentUserId();
+    const list = _db.get('pft_budgets', []).filter(b => b.userId === uid);
+    return { success: true, data: list };
+  }
 
-    static async createCategory(data) {
-        return this.post('/categories/create', data);
-    }
+  static async createBudget(data) {
+    const uid = API._currentUserId();
+    const list = _db.get('pft_budgets', []);
+    const item = { ...data, id: _db.nextId('pft_budgets'), userId: uid };
+    list.push(item);
+    _db.set('pft_budgets', list);
+    return { success: true, data: item };
+  }
 
-    static async updateCategory(id, data) {
-        return this.put(`/categories/${id}`, data);
-    }
+  static async updateBudget(id, data) {
+    const uid = API._currentUserId();
+    const list = _db.get('pft_budgets', []);
+    const idx = list.findIndex(b => b.id === Number(id) && b.userId === uid);
+    if (idx === -1) return { error: 'Not found' };
+    list[idx] = { ...list[idx], ...data };
+    _db.set('pft_budgets', list);
+    return { success: true, data: list[idx] };
+  }
 
-    static async deleteCategory(id) {
-        return this.delete(`/categories/${id}`);
-    }
+  static async deleteBudget(id) {
+    const uid = API._currentUserId();
+    let list = _db.get('pft_budgets', []);
+    list = list.filter(b => !(b.id === Number(id) && b.userId === uid));
+    _db.set('pft_budgets', list);
+    return { success: true };
+  }
 
-    // Budgets endpoints
-    static async getBudgets() {
-        return this.get('/budgets');
-    }
+  // ---- SAVINGS GOALS ----
+  static async getGoals() {
+    const uid = API._currentUserId();
+    const list = _db.get('pft_goals', []).filter(g => g.userId === uid);
+    return { success: true, data: list };
+  }
 
-    static async createBudget(data) {
-        return this.post('/budgets/create', data);
-    }
+  static async createGoal(data) {
+    const uid = API._currentUserId();
+    const list = _db.get('pft_goals', []);
+    const item = { ...data, id: _db.nextId('pft_goals'), userId: uid };
+    list.push(item);
+    _db.set('pft_goals', list);
+    return { success: true, data: item };
+  }
 
-    static async updateBudget(id, data) {
-        return this.put(`/budgets/${id}`, data);
-    }
+  static async updateGoal(id, data) {
+    const uid = API._currentUserId();
+    const list = _db.get('pft_goals', []);
+    const idx = list.findIndex(g => g.id === Number(id) && g.userId === uid);
+    if (idx === -1) return { error: 'Not found' };
+    list[idx] = { ...list[idx], ...data };
+    _db.set('pft_goals', list);
+    return { success: true, data: list[idx] };
+  }
 
-    static async deleteBudget(id) {
-        return this.delete(`/budgets/${id}`);
-    }
+  static async deleteGoal(id) {
+    const uid = API._currentUserId();
+    let list = _db.get('pft_goals', []);
+    list = list.filter(g => !(g.id === Number(id) && g.userId === uid));
+    _db.set('pft_goals', list);
+    return { success: true };
+  }
 
-    // Savings Goals endpoints
-    static async getGoals() {
-        return this.get('/goals');
-    }
+  // ---- DASHBOARD ----
+  static async getDashboardData() {
+    const uid = API._currentUserId();
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth() + 1;
+    const prefix = `${year}-${String(month).padStart(2, '0')}`;
 
-    static async createGoal(data) {
-        return this.post('/goals/create', data);
-    }
+    const allTx = _db.get('pft_transactions', []).filter(t => t.userId === uid);
+    const monthTx = allTx.filter(t => t.date.startsWith(prefix));
 
-    static async updateGoal(id, data) {
-        return this.put(`/goals/${id}`, data);
-    }
+    const totalIncome  = allTx.filter(t => t.type === 'income').reduce((s, t) => s + Number(t.amount), 0);
+    const totalExpense = allTx.filter(t => t.type === 'expense').reduce((s, t) => s + Number(t.amount), 0);
+    const monthIncome  = monthTx.filter(t => t.type === 'income').reduce((s, t) => s + Number(t.amount), 0);
+    const monthExpense = monthTx.filter(t => t.type === 'expense').reduce((s, t) => s + Number(t.amount), 0);
 
-    static async deleteGoal(id) {
-        return this.delete(`/goals/${id}`);
-    }
+    const budgets = _db.get('pft_budgets', []).filter(b => b.userId === uid);
+    const goals   = _db.get('pft_goals',   []).filter(g => g.userId === uid);
 
-    // Dashboard endpoints
-    static async getDashboardData() {
-        return this.get('/dashboard');
-    }
+    return {
+      success: true,
+      data: {
+        balance: totalIncome - totalExpense,
+        monthlyIncome: monthIncome,
+        monthlyExpense: monthExpense,
+        totalTransactions: allTx.length,
+        recentTransactions: allTx.slice(-5).reverse(),
+        budgets,
+        goals
+      }
+    };
+  }
 }
